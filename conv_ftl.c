@@ -303,7 +303,7 @@ static void init_maptbl(struct conv_ftl *conv_ftl)
 
 	conv_ftl->maptbl = vmalloc(sizeof(struct ppa) * spp->tt_pgs);
 	for (i = 0; i < spp->tt_pgs; i++) {
-		conv_ftl->maptbl[i].ppa = UNMAPPED_PPA;
+		conv_ftl->maptbl[i].ppa = 0;
 	}
 }
 

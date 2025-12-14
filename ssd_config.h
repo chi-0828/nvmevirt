@@ -68,15 +68,18 @@ enum {
 #define NS_SSD_TYPE_1 NS_SSD_TYPE_0
 #define NS_CAPACITY_1 (0)
 #define MDTS (6)
-#define CELL_MODE (CELL_MODE_MLC)
+#define CELL_MODE (CELL_MODE_TLC)
 
 #define SSD_PARTITIONS (4)
-#define NAND_CHANNELS (8)
-#define LUNS_PER_NAND_CH (2)
-#define PLNS_PER_LUN (1)
-#define FLASH_PAGE_SIZE KB(32)
-#define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 1)
-#define BLKS_PER_PLN (8192)
+#define NAND_CHANNELS (8)       // 8 通道 (標準高階 SSD 配置)
+#define LUNS_PER_NAND_CH (2)    // 每個通道 2 個 Die
+#define PLNS_PER_LUN (1)       
+// [關鍵修改] 16KB Page Size
+#define FLASH_PAGE_SIZE KB(16)  
+// 設定 OneShot Read 為 1 個物理 Page (1:1 讀取)
+#define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 1) 
+
+#define BLKS_PER_PLN (8192)     // Block 數量
 #define BLK_SIZE (0) /*BLKS_PER_PLN should not be 0 */
 static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 
@@ -86,14 +89,20 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define NAND_CHANNEL_BANDWIDTH (800ull) //MB/s
 #define PCIE_BANDWIDTH (3360ull) //MB/s
 
-#define NAND_4KB_READ_LATENCY_LSB (35760 - 6000) //ns
-#define NAND_4KB_READ_LATENCY_MSB (35760 + 6000) //ns
-#define NAND_4KB_READ_LATENCY_CSB (0) //not used
-#define NAND_READ_LATENCY_LSB (36013 - 6000)
-#define NAND_READ_LATENCY_MSB (36013 + 6000)
-#define NAND_READ_LATENCY_CSB (0) //not used
-#define NAND_PROG_LATENCY (185000)
-#define NAND_ERASE_LATENCY (0)
+// 1. LSB (Lower Page) - 37us
+#define NAND_4KB_READ_LATENCY_LSB (37000) 
+#define NAND_READ_LATENCY_LSB     (37000)
+
+// 2. CSB (Center Page) - 46us (最慢的 Page)
+#define NAND_4KB_READ_LATENCY_CSB (46000)
+#define NAND_READ_LATENCY_CSB     (46000)
+
+// 3. MSB (Upper Page) - 37us
+#define NAND_4KB_READ_LATENCY_MSB (37000)
+#define NAND_READ_LATENCY_MSB     (37000)
+
+#define NAND_PROG_LATENCY (600000)
+#define NAND_ERASE_LATENCY (5000000)
 
 #define FW_4KB_READ_LATENCY (21500)
 #define FW_READ_LATENCY (30490)
@@ -102,11 +111,19 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define FW_CH_XFER_LATENCY (0)
 #define OP_AREA_PERCENT (0.07)
 
-#define GLOBAL_WB_SIZE (NAND_CHANNELS * LUNS_PER_NAND_CH * ONESHOT_PAGE_SIZE * 2)
-#define WRITE_EARLY_COMPLETION 1
+#define GLOBAL_WB_SIZE (FLASH_PAGE_SIZE * 1)
+#define WRITE_EARLY_COMPLETION 0
 
 #define LBA_BITS (9)
 #define LBA_SIZE (1 << LBA_BITS)
+
+#define TOTAL_PAGES_TO_SCAN  (10000)
+#define ASIC_PER_PAGE_LATENCY (345)
+#define ENABLE_MULTI_PLANE_SCAN (1)
+
+#define K_TOP_RESULTS       5
+#define CHUNK_SIZE_BYTES    4096 
+#define RAG_RESULT_SIZE     (K_TOP_RESULTS * CHUNK_SIZE_BYTES)
 
 #elif (BASE_SSD == ZNS_PROTOTYPE)
 #define NR_NAMESPACES 1

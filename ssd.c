@@ -292,6 +292,41 @@ static void ssd_remove_pcie(struct ssd_pcie *pcie)
 	kfree(pcie->perf_model);
 }
 
+
+// Helper: 找出全 SSD 中最閒置的 LUN (Least Busy) 
+static struct nand_lun *find_idle_lun(struct ssd *ssd)
+{
+    struct nand_lun *best_lun = NULL;
+    uint64_t min_busy_time = (uint64_t)-1; // Max UINT64
+    uint64_t current_clock = __get_ioclock(ssd); // 獲取當前時間作為基準
+
+    int ch_idx, lun_idx;
+    struct ssdparams *spp = &ssd->sp;
+
+    // 遍歷所有 Channel
+    for (ch_idx = 0; ch_idx < spp->nchs; ch_idx++) {
+        struct ssd_channel *ch = &ssd->ch[ch_idx];
+
+        // 遍歷該 Channel 下的所有 LUN (Die)
+        for (lun_idx = 0; lun_idx < spp->luns_per_ch; lun_idx++) {
+            struct nand_lun *candidate = &ch->lun[lun_idx];
+            
+            // 優化：如果發現有 LUN 的空閒時間小於等於現在時間，代表它現在完全空閒
+            // 直接回傳它，不用再找了 (Greedy)
+            if (candidate->next_lun_avail_time <= current_clock) {
+                return candidate;
+            }
+
+            // 否則，尋找那個「最快會變空閒」的 LUN
+            if (candidate->next_lun_avail_time < min_busy_time) {
+                min_busy_time = candidate->next_lun_avail_time;
+                best_lun = candidate;
+            }
+        }
+    }
+    return best_lun;
+}
+
 void ssd_init(struct ssd *ssd, struct ssdparams *spp, uint32_t cpu_nr_dispatcher)
 {
 	uint32_t i;
@@ -385,37 +420,81 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	ch = get_ch(ssd, ppa);
 	cell = get_cell(ssd, ppa);
 	remaining = ncmd->xfer_size;
-
+	struct nand_lun *target_lun = lun;
+	
 	switch (c) {
 	case NAND_READ:
 		/* read: perform NAND cmd first */
-		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
+		target_lun = find_idle_lun(ssd);
+		NVMEV_ASSERT(target_lun != NULL);
+		nand_stime = max(target_lun->next_lun_avail_time, cmd_stime);
+		// Log 確認調度結果
+        printk(KERN_INFO "DEBUG: NAND_READ triggered! Scanning %llu pages...\n", (unsigned long long)TOTAL_PAGES_TO_SCAN);
+		printk(KERN_INFO "DEBUG: LUN time %llu ...\n", (unsigned long long)target_lun->next_lun_avail_time);
+		// printk(KERN_INFO "DEBUG: NAND_READ triggered! Scanning %llu pages...\n", (unsigned long long)TOTAL_PAGES_TO_SCAN);
+		
+		uint64_t single_page_read_time = spp->pg_rd_lat[cell]; // Flash tR 
+        uint64_t asic_time_per_page = (uint64_t)ASIC_PER_PAGE_LATENCY; // ASIC 
+        
+        uint64_t total_pages = TOTAL_PAGES_TO_SCAN;
+        uint64_t effective_cycle_time;
 
-		if (ncmd->xfer_size == 4096) {
-			nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
-		} else {
-			nand_etime = nand_stime + spp->pg_rd_lat[cell];
-		}
+        // 判斷是否啟用 Multi-Plane
+        if (ENABLE_MULTI_PLANE_SCAN && spp->pls_per_lun > 1) {
+            // [Shared ASIC 模型]
+            // 我們一次讀取 2 個 Page (Batch = 2)
+            // Flash 耗時: 1 * tR (因為並行)
+            // ASIC  耗時: 2 * tASIC (因為共享且序列處理)
+            // 該 Batch 的週期時間取決於瓶頸:
+            
+            uint64_t flash_batch_time = single_page_read_time;
+            uint64_t asic_batch_time = 2 * asic_time_per_page; // 這裡乘 2 代表 Shared ASIC
+            
+            // 瓶頸時間 (Bottleneck Latency)
+            uint64_t batch_cycle_time = max(flash_batch_time, asic_batch_time);
 
-		/* read: then data transfer through channel */
-		chnl_stime = nand_etime;
+            // 總批次數 (Batches)
+            uint64_t total_batches = DIV_ROUND_UP(total_pages, 2);
+            
+            effective_cycle_time = total_batches * batch_cycle_time;
 
-		while (remaining) {
-			xfer_size = min(remaining, (uint64_t)spp->max_ch_xfer_size);
-			chnl_etime = chmodel_request(ch->perf_model, chnl_stime, xfer_size);
+        } else {
+            // [Single Plane 模型]
+            // 每次讀 1 個 Page
+            uint64_t cycle_time = max(single_page_read_time, asic_time_per_page);
+            effective_cycle_time = total_pages * cycle_time;
+        }
 
-			if (ncmd->interleave_pci_dma) { /* overlap pci transfer with nand ch transfer*/
-				completed_time = ssd_advance_pcie(ssd, chnl_etime, xfer_size);
-			} else {
-				completed_time = chnl_etime;
-			}
+        // 3. 加上 Firmware 的彙整時間 (把 Top-K 結果收集起來)
+        // 假設 FW 需要一點時間處理最後的結果
+        uint64_t fw_overhead = spp->fw_rd_lat; 
 
-			remaining -= xfer_size;
-			chnl_stime = chnl_etime;
-		}
+        // [關鍵]: 這是 SSD 內部 ready 的時間
+        nand_etime = nand_stime + effective_cycle_time + fw_overhead;
+		target_lun->next_lun_avail_time = nand_etime;
+        // --- [修改結束] ---
 
-		lun->next_lun_avail_time = chnl_etime;
-		break;
+        /* read: then data transfer through channel */
+        chnl_stime = nand_etime;
+
+        // 4. 回傳資料給 Host
+        remaining = (uint64_t)RAG_RESULT_SIZE;
+        while (remaining) {
+            xfer_size = min(remaining, (uint64_t)spp->max_ch_xfer_size);
+            chnl_etime = chmodel_request(ch->perf_model, chnl_stime, xfer_size);
+
+            if (ncmd->interleave_pci_dma) { 
+                completed_time = ssd_advance_pcie(ssd, chnl_etime, xfer_size);
+            } else {
+                completed_time = chnl_etime;
+            }
+
+            remaining -= xfer_size;
+            chnl_stime = chnl_etime;
+        }
+
+        // lun->next_lun_avail_time = chnl_etime;
+        break;
 
 	case NAND_WRITE:
 		/* write: transfer data through channel first */

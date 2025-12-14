@@ -1,0 +1,13 @@
+[global]
+ioengine=libaio
+direct=1
+filename=/dev/nvme1n1
+group_reporting
+time_based
+runtime=30s
+
+[rag-test]
+rw=read
+bs=4096            
+iodepth=64         
+numjobs=16          
