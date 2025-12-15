@@ -396,6 +396,11 @@ uint64_t ssd_advance_write_buffer(struct ssd *ssd, uint64_t request_time, uint64
 
 uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 {
+	if (!cmd || !cmd->ppa) {
+        printk(KERN_ERR "NVMEV_DEBUG: ssd_advance_nand received NULL cmd or PPA! Skipping.\n");
+        return; // 直接返回，不要執行下去，這樣就不會 Kernel Panic
+    }
+	
 	int c = ncmd->cmd;
 	uint64_t cmd_stime = (ncmd->stime == 0) ? __get_ioclock(ssd) : ncmd->stime;
 	uint64_t nand_stime, nand_etime;
@@ -406,6 +411,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	struct ssd_channel *ch;
 	struct ppa *ppa = ncmd->ppa;
 	uint32_t cell;
+	uint64_t current_lba = ncmd->slba;
 	NVMEV_DEBUG(
 		"SSD: %p, Enter stime: %lld, ch %d lun %d blk %d page %d command %d ppa 0x%llx\n",
 		ssd, ncmd->stime, ppa->g.ch, ppa->g.lun, ppa->g.blk, ppa->g.pg, c, ppa->ppa);
@@ -420,81 +426,40 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	ch = get_ch(ssd, ppa);
 	cell = get_cell(ssd, ppa);
 	remaining = ncmd->xfer_size;
+
+
 	struct nand_lun *target_lun = lun;
-	
+
 	switch (c) {
 	case NAND_READ:
 		/* read: perform NAND cmd first */
-		target_lun = find_idle_lun(ssd);
-		NVMEV_ASSERT(target_lun != NULL);
-		nand_stime = max(target_lun->next_lun_avail_time, cmd_stime);
-		// Log 確認調度結果
-        printk(KERN_INFO "DEBUG: NAND_READ triggered! Scanning %llu pages...\n", (unsigned long long)TOTAL_PAGES_TO_SCAN);
-		printk(KERN_INFO "DEBUG: LUN time %llu ...\n", (unsigned long long)target_lun->next_lun_avail_time);
-		// printk(KERN_INFO "DEBUG: NAND_READ triggered! Scanning %llu pages...\n", (unsigned long long)TOTAL_PAGES_TO_SCAN);
-		
-		uint64_t single_page_read_time = spp->pg_rd_lat[cell]; // Flash tR 
-        uint64_t asic_time_per_page = (uint64_t)ASIC_PER_PAGE_LATENCY; // ASIC 
-        
-        uint64_t total_pages = TOTAL_PAGES_TO_SCAN;
-        uint64_t effective_cycle_time;
+		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
 
-        // 判斷是否啟用 Multi-Plane
-        if (ENABLE_MULTI_PLANE_SCAN && spp->pls_per_lun > 1) {
-            // [Shared ASIC 模型]
-            // 我們一次讀取 2 個 Page (Batch = 2)
-            // Flash 耗時: 1 * tR (因為並行)
-            // ASIC  耗時: 2 * tASIC (因為共享且序列處理)
-            // 該 Batch 的週期時間取決於瓶頸:
-            
-            uint64_t flash_batch_time = single_page_read_time;
-            uint64_t asic_batch_time = 2 * asic_time_per_page; // 這裡乘 2 代表 Shared ASIC
-            
-            // 瓶頸時間 (Bottleneck Latency)
-            uint64_t batch_cycle_time = max(flash_batch_time, asic_batch_time);
+		if (ncmd->xfer_size == 4096) {
+			nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
+		} else {
+			nand_etime = nand_stime + spp->pg_rd_lat[cell];
+		}
 
-            // 總批次數 (Batches)
-            uint64_t total_batches = DIV_ROUND_UP(total_pages, 2);
-            
-            effective_cycle_time = total_batches * batch_cycle_time;
+		/* read: then data transfer through channel */
+		chnl_stime = nand_etime;
 
-        } else {
-            // [Single Plane 模型]
-            // 每次讀 1 個 Page
-            uint64_t cycle_time = max(single_page_read_time, asic_time_per_page);
-            effective_cycle_time = total_pages * cycle_time;
-        }
+		while (remaining) {
+			xfer_size = min(remaining, (uint64_t)spp->max_ch_xfer_size);
+			chnl_etime = chmodel_request(ch->perf_model, chnl_stime, xfer_size);
 
-        // 3. 加上 Firmware 的彙整時間 (把 Top-K 結果收集起來)
-        // 假設 FW 需要一點時間處理最後的結果
-        uint64_t fw_overhead = spp->fw_rd_lat; 
+			if (ncmd->interleave_pci_dma) { /* overlap pci transfer with nand ch transfer*/
+				completed_time = ssd_advance_pcie(ssd, chnl_etime, xfer_size);
+			} else {
+				completed_time = chnl_etime;
+			}
 
-        // [關鍵]: 這是 SSD 內部 ready 的時間
-        nand_etime = nand_stime + effective_cycle_time + fw_overhead;
-		target_lun->next_lun_avail_time = nand_etime;
-        // --- [修改結束] ---
+			remaining -= xfer_size;
+			chnl_stime = chnl_etime;
+		}
 
-        /* read: then data transfer through channel */
-        chnl_stime = nand_etime;
-
-        // 4. 回傳資料給 Host
-        remaining = (uint64_t)RAG_RESULT_SIZE;
-        while (remaining) {
-            xfer_size = min(remaining, (uint64_t)spp->max_ch_xfer_size);
-            chnl_etime = chmodel_request(ch->perf_model, chnl_stime, xfer_size);
-
-            if (ncmd->interleave_pci_dma) { 
-                completed_time = ssd_advance_pcie(ssd, chnl_etime, xfer_size);
-            } else {
-                completed_time = chnl_etime;
-            }
-
-            remaining -= xfer_size;
-            chnl_stime = chnl_etime;
-        }
-
-        // lun->next_lun_avail_time = chnl_etime;
-        break;
+		lun->next_lun_avail_time = chnl_etime;
+		break;
 
 	case NAND_WRITE:
 		/* write: transfer data through channel first */
@@ -523,6 +488,61 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 		lun->next_lun_avail_time = nand_stime;
 		completed_time = nand_stime;
 		break;
+	
+	case NAND_RAG_READ:
+	{
+		// [1. Load Balancing] 找最閒的 Chip (target_lun)
+		struct nand_lun *target_lun = find_idle_lun(ssd);
+		NVMEV_ASSERT(target_lun != NULL);
+
+		// [2. ID 反查] 因為 struct nand_lun 沒有 id 欄位
+		int log_ch = -1, log_lun = -1, i;
+		for (i = 0; i < ssd->sp.nchs; i++) {
+			struct ssd_channel *tmp_ch = &ssd->ch[i];
+			if (target_lun >= tmp_ch->lun && target_lun < tmp_ch->lun + tmp_ch->nluns) {
+				log_ch = i;
+				log_lun = (int)(target_lun - tmp_ch->lun);
+				break;
+			}
+		}
+
+		// [3. 排隊]
+		nand_stime = max(target_lun->next_lun_avail_time, cmd_stime);
+
+		// Log
+		printk(KERN_INFO "RAG-ACCEL: Opcode 0xCA -> Ch%d-Lun%d | Load: %llu pages\n", 
+				log_ch, log_lun, (unsigned long long)TOTAL_PAGES_TO_SCAN);
+
+		// [4. 計算加速器延遲]	
+		// 使用跟 READ 一樣的變數名稱與來源
+		uint64_t t_r = spp->pg_rd_lat[CELL_TYPE_LSB]; 
+		uint64_t t_asic = (uint64_t)ASIC_PER_PAGE_LATENCY;
+		uint64_t cycle_time = max(t_r, t_asic);
+		
+		uint64_t processing_time = (uint64_t)TOTAL_PAGES_TO_SCAN * cycle_time;
+		
+		nand_etime = nand_stime + processing_time + spp->fw_rd_lat;
+
+		// [5. 鎖定 LUN]
+		target_lun->next_lun_avail_time = nand_etime;
+
+		// [6. PCIe 傳輸] 回傳 RAG 結果 (固定 20KB)
+		remaining = (uint64_t)RAG_RESULT_SIZE;
+		chnl_stime = nand_etime;
+
+		while (remaining > 0) {
+			xfer_size = min(remaining, (uint64_t)spp->max_ch_xfer_size);
+			
+			// 使用 PCIe model
+			chnl_etime = chmodel_request(ssd->pcie->perf_model, chnl_stime, xfer_size);
+
+			completed_time = ssd_advance_pcie(ssd, chnl_etime, xfer_size);
+
+			remaining -= xfer_size;
+			chnl_stime = chnl_etime; 
+		}
+	}
+	break;
 
 	default:
 		NVMEV_ERROR("Unsupported NAND command: 0x%x\n", c);

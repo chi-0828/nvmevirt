@@ -854,6 +854,7 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 		.stime = nsecs_start,
 		.interleave_pci_dma = true,
 	};
+	srd.slba = start_lpn * 8;
 
 	NVMEV_ASSERT(conv_ftls);
 	NVMEV_DEBUG_VERBOSE("%s: start_lpn=%lld, len=%lld, end_lpn=%lld", __func__, start_lpn, nr_lba, end_lpn);
@@ -1042,6 +1043,39 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 	return;
 }
 
+// 定義在 simulation/driver/conv_driver.c 或類似檔案中
+
+static bool conv_rag(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)
+{
+    // 1. 從 NVMe Command 中解析參數
+    // 假設 RAG 請求的 embedding vector 長度或 metadata 放在 cdw12/13
+    uint32_t data_len = req->q_len; // 或是從 cmd->rw.length 解析
+    
+    // 2. 構建 NAND 底層指令
+    struct nand_cmd srd = {
+        .type = NAND_REQ_TYPE_READ, // 讓排程器把它當作讀取請求處理 (避免死鎖)
+        .cmd  = NAND_CMD_RAG_SEARCH, // 告訴時序模型這是一個 "搜尋+運算" 指令
+        .stime = req->nsecs_start,
+        .xfer_size = data_len,      // 回傳結果的大小 (Top-K results)
+        .interleave_pci_dma = true, // 允許 DMA 併發
+        .ppa = NULL,                // 關鍵：設為 NULL 是因為這是 ISP 操作
+                                    // 掃描通常由 FTL 內部控制，或者遍歷特定 Block，
+                                    // 而不是由 Host 指定單一物理頁面地址。
+    };
+
+    // 3. 呼叫底層 FTL 或 NAND Driver 處理
+    int err = nand_submit_rag(ns->ctrl->nand, &srd, req);
+
+    if (err) {
+        // 錯誤處理
+        ret->status = NVME_SC_INTERNAL;
+        return false;
+    }
+
+    // 4. 設定完成回調
+    return true; 
+}
+
 bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)
 {
 	struct nvme_command *cmd = req->cmd;
@@ -1060,6 +1094,10 @@ bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struc
 	case nvme_cmd_flush:
 		conv_flush(ns, req, ret);
 		break;
+	case nvme_cmd_rag_search:
+        if (!conv_rag(ns, req, ret))
+            return false;
+        break;
 	default:
 		NVMEV_ERROR("%s: command not implemented: %s (0x%x)\n", __func__,
 				nvme_opcode_string(cmd->common.opcode), cmd->common.opcode);

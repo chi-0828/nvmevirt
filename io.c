@@ -107,7 +107,8 @@ static unsigned int __do_perform_io(int sqid, int sq_entry)
 		if (cmd->opcode == nvme_cmd_write ||
 		    cmd->opcode == nvme_cmd_zone_append) {
 			memcpy(nvmev_vdev->ns[nsid].mapped + offset, vaddr + mem_offs, io_size);
-		} else if (cmd->opcode == nvme_cmd_read) {
+		} else if (cmd->opcode == nvme_cmd_read || 
+                   cmd->opcode == nvme_cmd_rag_search) { // [新增] 讓 RAG 走讀取路徑
 			memcpy(vaddr + mem_offs, nvmev_vdev->ns[nsid].mapped + offset, io_size);
 		}
 
@@ -234,7 +235,8 @@ static unsigned int __do_perform_io_using_dma(int sqid, int sq_entry)
 		if (cmd->opcode == nvme_cmd_write ||
 		    cmd->opcode == nvme_cmd_zone_append) {
 			ioat_dma_submit(paddr, nvmev_vdev->config.storage_start + offset, io_size);
-		} else if (cmd->opcode == nvme_cmd_read) {
+		} else if (cmd->opcode == nvme_cmd_read || 
+				   cmd->opcode == nvme_cmd_rag_search) { // [新增] 讓 RAG 走讀取路徑
 			ioat_dma_submit(nvmev_vdev->config.storage_start + offset, paddr, io_size);
 		}
 

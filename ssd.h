@@ -30,6 +30,7 @@ enum {
 	NAND_WRITE = 1,
 	NAND_ERASE = 2,
 	NAND_NOP = 3,
+	NAND_CMD_RAG_SEARCH = 4,
 };
 
 enum {
@@ -129,6 +130,8 @@ struct nand_cmd {
 	uint64_t stime; /* Coperd: request arrival time */
 	bool interleave_pci_dma;
 	struct ppa *ppa;
+
+	uint64_t slba;
 };
 
 struct buffer {

@@ -3,6 +3,8 @@
 #ifndef _NVMEVIRT_SSD_CONFIG_H
 #define _NVMEVIRT_SSD_CONFIG_H
 
+#include "rag_config.h"
+
 /* SSD Model */
 #define INTEL_OPTANE 0
 #define SAMSUNG_970PRO 1
@@ -68,7 +70,7 @@ enum {
 #define NS_SSD_TYPE_1 NS_SSD_TYPE_0
 #define NS_CAPACITY_1 (0)
 #define MDTS (6)
-#define CELL_MODE (CELL_MODE_TLC)
+#define CELL_MODE (CELL_MODE_SLC)
 
 #define SSD_PARTITIONS (4)
 #define NAND_CHANNELS (8)       // 8 通道 (標準高階 SSD 配置)
@@ -89,23 +91,20 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define NAND_CHANNEL_BANDWIDTH (800ull) //MB/s
 #define PCIE_BANDWIDTH (3360ull) //MB/s
 
-// 1. LSB (Lower Page) - 37us
-#define NAND_4KB_READ_LATENCY_LSB (37000) 
-#define NAND_READ_LATENCY_LSB     (37000)
+#define NAND_4KB_READ_LATENCY_LSB (25000) 
+#define NAND_READ_LATENCY_LSB     (25000)
 
-// 2. CSB (Center Page) - 46us (最慢的 Page)
-#define NAND_4KB_READ_LATENCY_CSB (46000)
-#define NAND_READ_LATENCY_CSB     (46000)
+#define NAND_4KB_READ_LATENCY_CSB (25000)
+#define NAND_READ_LATENCY_CSB     (25000)
 
-// 3. MSB (Upper Page) - 37us
-#define NAND_4KB_READ_LATENCY_MSB (37000)
-#define NAND_READ_LATENCY_MSB     (37000)
+#define NAND_4KB_READ_LATENCY_MSB (25000)
+#define NAND_READ_LATENCY_MSB     (25000)
 
-#define NAND_PROG_LATENCY (600000)
-#define NAND_ERASE_LATENCY (5000000)
+#define NAND_PROG_LATENCY (200000) // SLC 寫入也比較快 (約 200us)
+#define NAND_ERASE_LATENCY (2000000) // SLC 抹除 (約 2ms)
 
-#define FW_4KB_READ_LATENCY (21500)
-#define FW_READ_LATENCY (30490)
+#define FW_4KB_READ_LATENCY (5000)  // FW 也設快一點
+#define FW_READ_LATENCY (10000)
 #define FW_WBUF_LATENCY0 (4000)
 #define FW_WBUF_LATENCY1 (460)
 #define FW_CH_XFER_LATENCY (0)
@@ -117,13 +116,8 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define LBA_BITS (9)
 #define LBA_SIZE (1 << LBA_BITS)
 
-#define TOTAL_PAGES_TO_SCAN  (10000)
 #define ASIC_PER_PAGE_LATENCY (345)
-#define ENABLE_MULTI_PLANE_SCAN (1)
 
-#define K_TOP_RESULTS       5
-#define CHUNK_SIZE_BYTES    4096 
-#define RAG_RESULT_SIZE     (K_TOP_RESULTS * CHUNK_SIZE_BYTES)
 
 #elif (BASE_SSD == ZNS_PROTOTYPE)
 #define NR_NAMESPACES 1

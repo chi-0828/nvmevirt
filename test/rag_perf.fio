@@ -3,11 +3,22 @@ ioengine=libaio
 direct=1
 filename=/dev/nvme1n1
 group_reporting
-time_based
-runtime=30s
+thread
 
-[rag-test]
+bs=4096
+
+offset=10G
+size=1G
+
+numjobs=16
+iodepth=1
+
+[rag-job]
 rw=read
-bs=4096            
-iodepth=64         
-numjobs=16          
+number_ios=216
+
+;資料集,總 Query 數,計算公式,number_ios 設定值
+;NQ,"3,452",3452/16,216
+;HotpotQA,"7,405",7405/16,463
+;BioASQ,500,500/16,32
+;Signal-1M,97,97/16,7
