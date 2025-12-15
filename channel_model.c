@@ -70,12 +70,19 @@ uint64_t chmodel_request(struct channel_model *ch, uint64_t request_time, uint64
 	//Search request time index
 	request_time_offs = (request_time / UNIT_TIME_INTERVAL) - (cur_time / UNIT_TIME_INTERVAL);
 
+	// if (request_time_offs >= NR_CREDIT_ENTRIES) {
+	// 	NVMEV_ERROR("[%s] Need to increase array size 0x%llx 0x%llx 0x%x\n", __func__,
+	// 		    request_time, cur_time, request_time_offs);
+	// 	return request_time; // return minimum delay
+	// }
 	if (request_time_offs >= NR_CREDIT_ENTRIES) {
-		NVMEV_ERROR("[%s] Need to increase array size 0x%llx 0x%llx 0x%x\n", __func__,
-			    request_time, cur_time, request_time_offs);
-		return request_time; // return minimum delay
+		// Long idle gap: fast-forward the model to request_time
+		MEMSET(ch->avail_credits, ch->max_credits, NR_CREDIT_ENTRIES);
+		ch->head = 0;
+		ch->cur_time = request_time;
+		ch->valid_len = 0;
+		request_time_offs = 0;
 	}
-
 	pos = (ch->head + request_time_offs) % NR_CREDIT_ENTRIES;
 	remaining_credits = units_to_xfer * UNIT_XFER_CREDITS;
 	remaining_credits += ch->command_credits;

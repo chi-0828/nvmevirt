@@ -152,10 +152,10 @@ void ssd_init_params(struct ssdparams *spp, uint64_t capacity, uint32_t nparts)
 	spp->tt_luns = spp->luns_per_ch * spp->nchs;
 
 	/* line is special, put it at the end */
-	spp->blks_per_line = spp->tt_luns; /* TODO: to fix under multiplanes */
+	spp->blks_per_line = spp->tt_luns * spp->pls_per_lun;  /* TODO: to fix under multiplanes */
 	spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
 	spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
-	spp->tt_lines = spp->blks_per_lun;
+	spp->tt_lines = spp->blks_per_pl;
 	/* TODO: to fix under multiplanes */ // lun size is super-block(line) size
 
 	check_params(spp);
@@ -297,26 +297,25 @@ static void ssd_remove_pcie(struct ssd_pcie *pcie)
 static struct nand_lun *find_idle_lun(struct ssd *ssd)
 {
     struct nand_lun *best_lun = NULL;
-    uint64_t min_busy_time = (uint64_t)-1;
-    uint64_t current_clock = cpu_clock(ssd->cpu_nr_dispatcher); // 使用 ssd.c 內部的 time helper
-    int i, j;
+    uint64_t min_busy_time = (uint64_t)-1; 
     struct ssdparams *spp = &ssd->sp;
-
+	int i, j;
     for (i = 0; i < spp->nchs; i++) {
         struct ssd_channel *ch = &ssd->ch[i];
         for (j = 0; j < spp->luns_per_ch; j++) {
-            struct nand_lun *candidate = &ch->lun[j];
-            if (candidate->next_lun_avail_time <= current_clock)
-                return candidate;
-            if (candidate->next_lun_avail_time < min_busy_time) {
-                min_busy_time = candidate->next_lun_avail_time;
-                best_lun = candidate;
+            struct nand_lun *cand = &ch->lun[j];
+            uint64_t t = cand->next_lun_avail_time;
+            if (t < min_busy_time) {
+                min_busy_time = t;
+                best_lun = cand;
             }
         }
     }
-    // 如果找不到 (極端情況)，回傳第一個
-    return &ssd->ch[0].lun[0];
+
+    NVMEV_ASSERT(best_lun != NULL);
+    return best_lun;
 }
+
 
 void ssd_init(struct ssd *ssd, struct ssdparams *spp, uint32_t cpu_nr_dispatcher)
 {
@@ -392,16 +391,23 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	int c = ncmd->cmd;
 	uint64_t cmd_stime = (ncmd->stime == 0) ? __get_ioclock(ssd) : ncmd->stime;
 
-	if (!ncmd || !ncmd->ppa) {
-        printk(KERN_ERR "NVMEV_DEBUG: ssd_advance_nand received NULL cmd or PPA! Skipping.\n");
-        return cmd_stime; // 直接返回，不要執行下去，這樣就不會 Kernel Panic
-    }
+	// if (!ncmd || !ncmd->ppa) {
+    //     printk(KERN_ERR "NVMEV_DEBUG: ssd_advance_nand received NULL cmd or PPA! Skipping.\n");
+    //     return cmd_stime; // 直接返回，不要執行下去，這樣就不會 Kernel Panic
+    // }
 
+	int log_ch, log_lun, i;
+	uint64_t t_r;
+	uint64_t t_asic;
+	uint64_t pages;
+	uint64_t planes;
+	uint64_t t_read, t_asicT, processing_time;
 	uint64_t nand_stime, nand_etime;
 	uint64_t chnl_stime, chnl_etime;
 	uint64_t remaining, xfer_size, completed_time;
 	struct ssdparams *spp;
 	struct nand_lun *lun;
+	struct nand_lun *target_lun;
 	struct ssd_channel *ch;
 	struct ppa *ppa = ncmd->ppa;
 	uint32_t cell;
@@ -420,9 +426,9 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	ch = get_ch(ssd, ppa);
 	cell = get_cell(ssd, ppa);
 	remaining = ncmd->xfer_size;
+	target_lun = lun;
 
-
-	struct nand_lun *target_lun = lun;
+	
 
 	switch (c) {
 	case NAND_READ:
@@ -486,11 +492,12 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	case NAND_RAG_SEARCH:
 	{
 		// [1. Load Balancing] 找最閒的 Chip (target_lun)
-		struct nand_lun *target_lun = find_idle_lun(ssd);
+		target_lun = find_idle_lun(ssd);
 		NVMEV_ASSERT(target_lun != NULL);
 
 		// [2. ID 反查] 因為 struct nand_lun 沒有 id 欄位
-		int log_ch = -1, log_lun = -1, i;
+		log_ch = -1;
+		log_lun = -1;
 		for (i = 0; i < ssd->sp.nchs; i++) {
 			struct ssd_channel *tmp_ch = &ssd->ch[i];
 			if (target_lun >= tmp_ch->lun && target_lun < tmp_ch->lun + tmp_ch->nluns) {
@@ -509,13 +516,17 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 
 		// [4. 計算加速器延遲]	
 		// 使用跟 READ 一樣的變數名稱與來源
-		uint64_t t_r = spp->pg_rd_lat[CELL_TYPE_LSB]; 
-		uint64_t t_asic = (uint64_t)ASIC_PER_PAGE_LATENCY;
-		uint64_t cycle_time = max(t_r, t_asic);
-		
-		uint64_t processing_time = (uint64_t)TOTAL_PAGES_TO_SCAN * cycle_time;
-		
+		t_r = spp->pg_rd_lat[CELL_TYPE_LSB]; 
+		t_asic = (uint64_t)ASIC_PER_PAGE_LATENCY;
+		pages  = (uint64_t)TOTAL_PAGES_TO_SCAN;
+		planes = (uint64_t)PLNS_PER_LUN;
+
+		t_read  = DIV_ROUND_UP(pages, planes) * t_r;   // multi-plane read
+		t_asicT = pages * t_asic * (uint64_t)CHUNKS_PER_PAGE;  // shared ASIC, serialized
+				
+		processing_time = max(t_read, t_asicT);        // pipelined overlap
 		nand_etime = nand_stime + processing_time + spp->fw_rd_lat;
+		printk(KERN_INFO "RAG-ACCEL: pages=%llu planes=%llu t_read=%lluns t_asic=%lluns proc=%lluns\n", pages, planes, t_read, t_asicT, processing_time);
 
 		// [5. 鎖定 LUN]
 		target_lun->next_lun_avail_time = nand_etime;
@@ -535,6 +546,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 			remaining -= xfer_size;
 			chnl_stime = chnl_etime; 
 		}
+		printk(KERN_INFO "RAG-ACCEL: pcie_return=%lluns\n", (unsigned long long)(chnl_stime - nand_etime));
 	}
 	break;
 

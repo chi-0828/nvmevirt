@@ -114,6 +114,10 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	int i;
 
 	lm->tt_lines = spp->blks_per_pl;
+	// printk(KERN_INFO "GEOM: blks_per_pl=%u tt_lines=%u plns_per_lun=%u\n",
+    //    spp->blks_per_pl, spp->tt_lines, PLNS_PER_LUN);
+	// printk(KERN_INFO "GEOM: lm tt_lines=%u spp.tt_lines=%lu\n",
+	//    lm->tt_lines, spp->tt_lines);
 	NVMEV_ASSERT(lm->tt_lines == spp->tt_lines);
 	lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
 

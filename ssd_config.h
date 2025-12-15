@@ -69,13 +69,13 @@ enum {
 #define NS_CAPACITY_0 (0)
 #define NS_SSD_TYPE_1 NS_SSD_TYPE_0
 #define NS_CAPACITY_1 (0)
-#define MDTS (6)
+#define MDTS (7)
 #define CELL_MODE (CELL_MODE_SLC)
 
-#define SSD_PARTITIONS (4)
-#define NAND_CHANNELS (8)       // 8 通道 (標準高階 SSD 配置)
-#define LUNS_PER_NAND_CH (2)    // 每個通道 2 個 Die
-#define PLNS_PER_LUN (1)       
+#define SSD_PARTITIONS (1)
+#define NAND_CHANNELS (8)      
+#define LUNS_PER_NAND_CH (4)   
+#define PLNS_PER_LUN (2)       
 // [關鍵修改] 16KB Page Size
 #define FLASH_PAGE_SIZE KB(16)  
 // 設定 OneShot Read 為 1 個物理 Page (1:1 讀取)
