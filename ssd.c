@@ -297,34 +297,25 @@ static void ssd_remove_pcie(struct ssd_pcie *pcie)
 static struct nand_lun *find_idle_lun(struct ssd *ssd)
 {
     struct nand_lun *best_lun = NULL;
-    uint64_t min_busy_time = (uint64_t)-1; // Max UINT64
-    uint64_t current_clock = __get_ioclock(ssd); // 獲取當前時間作為基準
-
-    int ch_idx, lun_idx;
+    uint64_t min_busy_time = (uint64_t)-1;
+    uint64_t current_clock = cpu_clock(ssd->cpu_nr_dispatcher); // 使用 ssd.c 內部的 time helper
+    int i, j;
     struct ssdparams *spp = &ssd->sp;
 
-    // 遍歷所有 Channel
-    for (ch_idx = 0; ch_idx < spp->nchs; ch_idx++) {
-        struct ssd_channel *ch = &ssd->ch[ch_idx];
-
-        // 遍歷該 Channel 下的所有 LUN (Die)
-        for (lun_idx = 0; lun_idx < spp->luns_per_ch; lun_idx++) {
-            struct nand_lun *candidate = &ch->lun[lun_idx];
-            
-            // 優化：如果發現有 LUN 的空閒時間小於等於現在時間，代表它現在完全空閒
-            // 直接回傳它，不用再找了 (Greedy)
-            if (candidate->next_lun_avail_time <= current_clock) {
+    for (i = 0; i < spp->nchs; i++) {
+        struct ssd_channel *ch = &ssd->ch[i];
+        for (j = 0; j < spp->luns_per_ch; j++) {
+            struct nand_lun *candidate = &ch->lun[j];
+            if (candidate->next_lun_avail_time <= current_clock)
                 return candidate;
-            }
-
-            // 否則，尋找那個「最快會變空閒」的 LUN
             if (candidate->next_lun_avail_time < min_busy_time) {
                 min_busy_time = candidate->next_lun_avail_time;
                 best_lun = candidate;
             }
         }
     }
-    return best_lun;
+    // 如果找不到 (極端情況)，回傳第一個
+    return &ssd->ch[0].lun[0];
 }
 
 void ssd_init(struct ssd *ssd, struct ssdparams *spp, uint32_t cpu_nr_dispatcher)
@@ -396,13 +387,16 @@ uint64_t ssd_advance_write_buffer(struct ssd *ssd, uint64_t request_time, uint64
 
 uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 {
-	if (!cmd || !cmd->ppa) {
-        printk(KERN_ERR "NVMEV_DEBUG: ssd_advance_nand received NULL cmd or PPA! Skipping.\n");
-        return; // 直接返回，不要執行下去，這樣就不會 Kernel Panic
-    }
+	
 	
 	int c = ncmd->cmd;
 	uint64_t cmd_stime = (ncmd->stime == 0) ? __get_ioclock(ssd) : ncmd->stime;
+
+	if (!ncmd || !ncmd->ppa) {
+        printk(KERN_ERR "NVMEV_DEBUG: ssd_advance_nand received NULL cmd or PPA! Skipping.\n");
+        return cmd_stime; // 直接返回，不要執行下去，這樣就不會 Kernel Panic
+    }
+
 	uint64_t nand_stime, nand_etime;
 	uint64_t chnl_stime, chnl_etime;
 	uint64_t remaining, xfer_size, completed_time;
@@ -489,7 +483,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 		completed_time = nand_stime;
 		break;
 	
-	case NAND_RAG_READ:
+	case NAND_RAG_SEARCH:
 	{
 		// [1. Load Balancing] 找最閒的 Chip (target_lun)
 		struct nand_lun *target_lun = find_idle_lun(ssd);

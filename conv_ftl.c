@@ -1044,36 +1044,33 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 }
 
 // 定義在 simulation/driver/conv_driver.c 或類似檔案中
-
+static struct ppa RAG_DUMMY_PPA = { .ppa = 0 };
 static bool conv_rag(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)
 {
-    // 1. 從 NVMe Command 中解析參數
-    // 假設 RAG 請求的 embedding vector 長度或 metadata 放在 cdw12/13
-    uint32_t data_len = req->q_len; // 或是從 cmd->rw.length 解析
+    struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;
+    // 簡單起見，我們總是使用第 0 個 partition 的 SSD 實例來發送全域指令
+    struct conv_ftl *conv_ftl = &conv_ftls[0]; 
     
-    // 2. 構建 NAND 底層指令
+    // 從 cmd 取得參數 (Host 透過 NVMe Read length 欄位傳遞)
+    struct nvme_rw_command *rw_cmd = &(req->cmd->rw);
+    // 計算長度: (length + 1) * Sector Size
+    uint32_t data_len = (rw_cmd->length + 1) * conv_ftl->ssd->sp.secsz;
+
     struct nand_cmd srd = {
-        .type = NAND_REQ_TYPE_READ, // 讓排程器把它當作讀取請求處理 (避免死鎖)
-        .cmd  = NAND_CMD_RAG_SEARCH, // 告訴時序模型這是一個 "搜尋+運算" 指令
+        .type = USER_IO,       // 使用 USER_IO 避免被 GC 邏輯干擾
+        .cmd = NAND_RAG_SEARCH, // 這裡對應 ssd.h 的新 Enum
         .stime = req->nsecs_start,
-        .xfer_size = data_len,      // 回傳結果的大小 (Top-K results)
-        .interleave_pci_dma = true, // 允許 DMA 併發
-        .ppa = NULL,                // 關鍵：設為 NULL 是因為這是 ISP 操作
-                                    // 掃描通常由 FTL 內部控制，或者遍歷特定 Block，
-                                    // 而不是由 Host 指定單一物理頁面地址。
+        .xfer_size = data_len, 
+        .interleave_pci_dma = true,
+        .ppa = &RAG_DUMMY_PPA, // [關鍵修正] 傳入有效指標
     };
 
-    // 3. 呼叫底層 FTL 或 NAND Driver 處理
-    int err = nand_submit_rag(ns->ctrl->nand, &srd, req);
+    // 發送給底層 SSD 模擬器
+    uint64_t nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 
-    if (err) {
-        // 錯誤處理
-        ret->status = NVME_SC_INTERNAL;
-        return false;
-    }
-
-    // 4. 設定完成回調
-    return true; 
+    ret->nsecs_target = nsecs_completed;
+    ret->status = NVME_SC_SUCCESS;
+    return true;
 }
 
 bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)

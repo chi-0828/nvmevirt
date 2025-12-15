@@ -30,7 +30,7 @@ enum {
 	NAND_WRITE = 1,
 	NAND_ERASE = 2,
 	NAND_NOP = 3,
-	NAND_CMD_RAG_SEARCH = 4,
+	NAND_RAG_SEARCH = 4,
 };
 
 enum {

@@ -26,7 +26,7 @@ int main() {
         .cdw10 = 0,
         .cdw11 = 0,
         .cdw12 = (RAG_RESULT_SIZE / 512) - 1, // 告訴 Driver 資料長度
-        .timeout_ms = 5000,
+        .timeout_ms = 60000,
     };
 
     printf("Sending RAG IOCTL (Opcode 0xCA)...\n");
